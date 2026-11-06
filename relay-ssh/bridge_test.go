@@ -28,3 +28,25 @@ func BenchmarkInspectHandshakeHeaders(b *testing.B) {
 		inspectHandshakeHeaders(headers)
 	}
 }
+
+func TestRelayEndReason(t *testing.T) {
+	tests := []struct {
+		name        string
+		clientToSSH string
+		sshToClient string
+		want        string
+	}{
+		{name: "normal EOF", clientToSSH: "eof", sshToClient: "eof", want: "relay_complete"},
+		{name: "read error", clientToSSH: "read_error", sshToClient: "eof", want: "relay_read_error"},
+		{name: "write error", clientToSSH: "eof", sshToClient: "write_error", want: "relay_write_error"},
+		{name: "idle timeout remains normal close", clientToSSH: "idle_timeout", sshToClient: "eof", want: "relay_complete"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := relayEndReason(test.clientToSSH, test.sshToClient); got != test.want {
+				t.Fatalf("relayEndReason() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
