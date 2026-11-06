@@ -29,7 +29,7 @@ const (
 	idleTimeout      = 600 * time.Second
 	handshakeTimeout = 4 * time.Second
 	maxHeaderSize    = 16 * 1024
-	shutdownGrace    = 10 * time.Second
+	shutdownGrace    = 7 * time.Second
 )
 
 var bufferPool = sync.Pool{
