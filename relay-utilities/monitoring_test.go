@@ -42,9 +42,25 @@ func TestBuildMonitoringTimeSeries(t *testing.T) {
 	if len(series) != 14 {
 		t.Fatalf("time series count = %d, want 14", len(series))
 	}
+
+	wantResourceLabels := map[string]string{
+		"project_id": metadata.ProjectID,
+		"location":   metadata.Location,
+		"namespace":  metadata.ServiceName,
+		"job":        metadata.RevisionName,
+		"task_id":    metadata.InstanceID,
+	}
 	for _, item := range series {
-		if item.Resource.Type != "cloud_run_revision" {
-			t.Fatalf("resource type = %q, want cloud_run_revision", item.Resource.Type)
+		if item.Resource.Type != "generic_task" {
+			t.Fatalf("resource type = %q, want generic_task", item.Resource.Type)
+		}
+		if len(item.Resource.Labels) != len(wantResourceLabels) {
+			t.Fatalf("resource label count = %d, want %d", len(item.Resource.Labels), len(wantResourceLabels))
+		}
+		for key, want := range wantResourceLabels {
+			if got := item.Resource.Labels[key]; got != want {
+				t.Fatalf("resource label %q = %q, want %q", key, got, want)
+			}
 		}
 		if item.Metric.Labels["instance_id"] != metadata.InstanceID {
 			t.Fatalf("instance_id label = %q, want %q", item.Metric.Labels["instance_id"], metadata.InstanceID)
