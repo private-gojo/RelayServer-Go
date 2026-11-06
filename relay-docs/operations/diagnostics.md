@@ -75,8 +75,8 @@ Required setup:
    ```
 2. Grant the Cloud Run runtime service account roles/monitoring.metricWriter on the project:
    ```bash
-   gcloud projects add-iam-policy-binding PROJECT_ID \\\
-     --member="serviceAccount:SERVICE_ACCOUNT_EMAIL" \\\
+   gcloud projects add-iam-policy-binding PROJECT_ID \\
+     --member="serviceAccount:SERVICE_ACCOUNT_EMAIL" \\
      --role="roles/monitoring.metricWriter"
    ```
 3. Deploy a new revision. The exporter logs cloud_monitoring_exporter_started on startup. API/IAM failures appear as custom_metrics_write_failed events under component=cloud-monitoring.
