@@ -1,0 +1,5 @@
+Copyright (C) 2026 Gojo Research
+
+This notice applies to the RelayServer-Go root project, except components that carry their own license and copyright notices.
+
+The independent Rust UDPGW component under relay-rust/ retains its own MIT license and original copyright notice. See relay-rust/LICENSE.

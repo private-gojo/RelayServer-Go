@@ -86,7 +86,7 @@ COPY --from=udpgw-builder /build/target/release/badvpn-udpgw /usr/local/bin/badv
 RUN apk add --no-cache \
     supervisor=4.3.0-r1 \
     bash=5.3.9-r1 \
-    shadow=4.19.4-r0 \
+    shadow=4.18.0-r1 \
     tzdata=2026f-r0 \
     zlib=1.3.2-r1 \
     nginx=1.30.6-r0 \

@@ -37,6 +37,8 @@ RelayServer-Go/
 
 ## Licensing
 
+Copyright (C) 2026 Gojo Research.
+
 The root project is licensed under GNU AGPL-3.0-or-later. Modified versions operated as network services must provide remote users an opportunity to obtain the corresponding source under AGPL section 13. This license governs derivatives; it does not prevent independent reimplementations of the same general idea.
 
 The independent Rust UDPGW component under `relay-rust/` retains its own MIT license and original copyright notice. The root AGPL license does not replace that component-level license.
