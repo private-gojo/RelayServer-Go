@@ -31,10 +31,10 @@ func BenchmarkInspectHandshakeHeaders(b *testing.B) {
 
 func TestRelayEndReason(t *testing.T) {
 	tests := []struct {
-		name       string
+		name        string
 		clientToSSH string
 		sshToClient string
-		want       string
+		want        string
 	}{
 		{name: "normal EOF", clientToSSH: "eof", sshToClient: "eof", want: "relay_complete"},
 		{name: "read error", clientToSSH: "read_error", sshToClient: "eof", want: "relay_read_error"},
