@@ -5,7 +5,6 @@ package utilities
 
 import (
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"strconv"
@@ -15,19 +14,89 @@ import (
 	"time"
 )
 
-// TelemetryCounters tracks lock-free atomic counters across all CPU cores.
 type TelemetryCounters struct {
-	SessionSeq       atomic.Uint64
-	ActiveSessions   atomic.Int64
-	TotalSessions    atomic.Uint64
-	TotalClientToSSH atomic.Uint64
-	TotalSSHToClient atomic.Uint64
-	RejectedConns    atomic.Uint64
+	SessionSeq            atomic.Uint64
+	ActiveConnections     atomic.Int64
+	ActiveHandshakes      atomic.Int64
+	ActiveSSHSessions     atomic.Int64
+	TotalConnections      atomic.Uint64
+	TotalSSHSessions      atomic.Uint64
+	FailedHandshakes      atomic.Uint64
+	FailedSSHConnections  atomic.Uint64
+	SessionErrors         atomic.Uint64
+	RejectedConns         atomic.Uint64
+	PeakActiveSSHSessions atomic.Int64
+	TotalClientToSSH      atomic.Uint64
+	TotalSSHToClient      atomic.Uint64
+}
+
+type TelemetrySnapshot struct {
+	ActiveConnections     int64
+	ActiveHandshakes      int64
+	ActiveSSHSessions     int64
+	TotalConnections      uint64
+	TotalSSHSessions      uint64
+	FailedHandshakes      uint64
+	FailedSSHConnections  uint64
+	SessionErrors         uint64
+	RejectedConns         uint64
+	PeakActiveSSHSessions int64
+	TotalClientToSSH      uint64
+	TotalSSHToClient      uint64
 }
 
 var Counters = &TelemetryCounters{}
 
-// OptimizeSocket applies exact low-latency TCP options from proxy.py while preserving kernel TCP autotuning.
+func (c *TelemetryCounters) ConnectionStarted() uint64 {
+	id := c.SessionSeq.Add(1)
+	c.TotalConnections.Add(1)
+	c.ActiveConnections.Add(1)
+	c.ActiveHandshakes.Add(1)
+	return id
+}
+
+func (c *TelemetryCounters) HandshakeFinished(success bool) {
+	c.ActiveHandshakes.Add(-1)
+	if !success {
+		c.FailedHandshakes.Add(1)
+	}
+}
+
+func (c *TelemetryCounters) SSHSessionStarted() {
+	active := c.ActiveSSHSessions.Add(1)
+	c.TotalSSHSessions.Add(1)
+	for peak := c.PeakActiveSSHSessions.Load(); active > peak; peak = c.PeakActiveSSHSessions.Load() {
+		if c.PeakActiveSSHSessions.CompareAndSwap(peak, active) {
+			break
+		}
+	}
+}
+
+func (c *TelemetryCounters) SSHSessionFinished() {
+	c.ActiveSSHSessions.Add(-1)
+}
+
+func (c *TelemetryCounters) ConnectionFinished() {
+	c.ActiveConnections.Add(-1)
+}
+
+func (c *TelemetryCounters) Snapshot() TelemetrySnapshot {
+	return TelemetrySnapshot{
+		ActiveConnections:     c.ActiveConnections.Load(),
+		ActiveHandshakes:      c.ActiveHandshakes.Load(),
+		ActiveSSHSessions:     c.ActiveSSHSessions.Load(),
+		TotalConnections:      c.TotalConnections.Load(),
+		TotalSSHSessions:      c.TotalSSHSessions.Load(),
+		FailedHandshakes:      c.FailedHandshakes.Load(),
+		FailedSSHConnections:  c.FailedSSHConnections.Load(),
+		SessionErrors:         c.SessionErrors.Load(),
+		RejectedConns:         c.RejectedConns.Load(),
+		PeakActiveSSHSessions: c.PeakActiveSSHSessions.Load(),
+		TotalClientToSSH:      c.TotalClientToSSH.Load(),
+		TotalSSHToClient:      c.TotalSSHToClient.Load(),
+	}
+}
+
 func OptimizeSocket(conn net.Conn) {
 	tcpConn, ok := conn.(*net.TCPConn)
 	if !ok || tcpConn == nil {
@@ -62,103 +131,118 @@ func readProcMetrics() (string, string) {
 	if entries, err := os.ReadDir("/proc/self/fd"); err == nil {
 		openFDs = strconv.Itoa(len(entries))
 	}
-
 	return rssKB, openFDs
+}
+
+func parseCPUStat(data string) (usageUsec *int64, throttledUsec *int64) {
+	var throttledNsec *int64
+	for _, line := range strings.Split(data, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		value, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		switch fields[0] {
+		case "usage_usec":
+			v := value
+			usageUsec = &v
+		case "throttled_usec":
+			v := value
+			throttledUsec = &v
+		case "throttled_time":
+			v := value / 1000
+			throttledNsec = &v
+		}
+	}
+	if throttledUsec == nil {
+		throttledUsec = throttledNsec
+	}
+	return usageUsec, throttledUsec
 }
 
 func readCgroupMetrics() (string, *int64, *int64, string, string) {
 	quota := "n/a"
 	var cpuUsageUsec *int64
-	var throttled *int64
+	var throttledUsec *int64
 	memCurrent := "n/a"
 	memMax := "n/a"
 
-	if b, err := os.ReadFile("/sys/fs/cgroup/cpu.max"); err == nil {
-		quota = strings.TrimSpace(string(b))
+	if data, err := os.ReadFile("/sys/fs/cgroup/cpu.max"); err == nil {
+		quota = strings.TrimSpace(string(data))
 	}
-
-	for _, p := range []string{"/sys/fs/cgroup/cpu.stat", "/sys/fs/cgroup/cpu/cpu.stat"} {
-		b, err := os.ReadFile(p)
+	for _, path := range []string{"/sys/fs/cgroup/cpu.stat", "/sys/fs/cgroup/cpu/cpu.stat"} {
+		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
-		for _, line := range strings.Split(string(b), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) != 2 {
-				continue
-			}
-			val, err := strconv.ParseInt(fields[1], 10, 64)
-			if err != nil {
-				continue
-			}
-			switch fields[0] {
-			case "usage_usec":
-				v := val
-				cpuUsageUsec = &v
-			case "throttled_usec", "throttled_time":
-				if throttled == nil {
-					v := val
-					throttled = &v
-				}
-			}
-		}
+		cpuUsageUsec, throttledUsec = parseCPUStat(string(data))
 		break
 	}
 
 	if cpuUsageUsec == nil {
-		if b, err := os.ReadFile("/sys/fs/cgroup/cpuacct/cpuacct.usage"); err == nil {
-			if val, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); err == nil {
-				v := val / 1000
-				cpuUsageUsec = &v
+		if data, err := os.ReadFile("/sys/fs/cgroup/cpuacct/cpuacct.usage"); err == nil {
+			if value, parseErr := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64); parseErr == nil {
+				converted := value / 1000
+				cpuUsageUsec = &converted
 			}
 		}
 	}
 
-	if bCurr, err1 := os.ReadFile("/sys/fs/cgroup/memory.current"); err1 == nil {
-		memCurrent = strings.TrimSpace(string(bCurr))
-		if bMax, err2 := os.ReadFile("/sys/fs/cgroup/memory.max"); err2 == nil {
-			memMax = strings.TrimSpace(string(bMax))
+	if current, err := os.ReadFile("/sys/fs/cgroup/memory.current"); err == nil {
+		memCurrent = strings.TrimSpace(string(current))
+		if maximum, readErr := os.ReadFile("/sys/fs/cgroup/memory.max"); readErr == nil {
+			memMax = strings.TrimSpace(string(maximum))
 		}
-	} else if bCurr, err1 := os.ReadFile("/sys/fs/cgroup/memory/memory.usage_in_bytes"); err1 == nil {
-		memCurrent = strings.TrimSpace(string(bCurr))
-		if bMax, err2 := os.ReadFile("/sys/fs/cgroup/memory/memory.limit_in_bytes"); err2 == nil {
-			memMax = strings.TrimSpace(string(bMax))
+	} else if current, err := os.ReadFile("/sys/fs/cgroup/memory/memory.usage_in_bytes"); err == nil {
+		memCurrent = strings.TrimSpace(string(current))
+		if maximum, readErr := os.ReadFile("/sys/fs/cgroup/memory/memory.limit_in_bytes"); readErr == nil {
+			memMax = strings.TrimSpace(string(maximum))
 		}
 	}
-
-	return quota, cpuUsageUsec, throttled, memCurrent, memMax
+	return quota, cpuUsageUsec, throttledUsec, memCurrent, memMax
 }
 
 func getProcessCPUTimeSeconds() float64 {
-	var ru syscall.Rusage
-	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
+	var usage syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
 		return 0
 	}
-	utime := float64(ru.Utime.Sec) + float64(ru.Utime.Usec)/1e6
-	stime := float64(ru.Stime.Sec) + float64(ru.Stime.Usec)/1e6
-	return utime + stime
+	userTime := float64(usage.Utime.Sec) + float64(usage.Utime.Usec)/1e6
+	systemTime := float64(usage.Stime.Sec) + float64(usage.Stime.Usec)/1e6
+	return userTime + systemTime
 }
 
-// StartMetricsLoop runs the 10-second container & process resource diagnostic loop.
-func StartMetricsLoop(stopCh <-chan struct{}) {
+func calculateMbps(current, previous uint64, elapsedSeconds float64) float64 {
+	if current < previous || elapsedSeconds <= 0 {
+		return 0
+	}
+	return float64(current-previous) * 8 / elapsedSeconds / 1e6
+}
+
+func StartMetricsLoop(stopCh <-chan struct{}, exporter *CloudMonitoringExporter) {
 	const interval = 10 * time.Second
 	nextTick := time.Now().Add(interval)
 	prevWall := time.Now()
 	prevCPU := getProcessCPUTimeSeconds()
 	_, prevCgroupCPU, prevThrottled, _, _ := readCgroupMetrics()
+	prevSnapshot := Counters.Snapshot()
+	metricsLog := Logger.With("component", "telemetry")
 
 	for {
-		sleepDur := time.Until(nextTick)
-		if sleepDur < 0 {
-			sleepDur = 0
+		sleepDuration := time.Until(nextTick)
+		if sleepDuration < 0 {
+			sleepDuration = 0
 		}
-		timer := time.NewTimer(sleepDur)
+		timer := time.NewTimer(sleepDuration)
 		select {
 		case <-stopCh:
 			timer.Stop()
 			return
 		case now := <-timer.C:
-			lagMs := float64(now.Sub(nextTick).Microseconds()) / 1000.0
+			lagMs := float64(now.Sub(nextTick).Microseconds()) / 1000
 			if lagMs < 0 {
 				lagMs = 0
 			}
@@ -167,59 +251,75 @@ func StartMetricsLoop(stopCh <-chan struct{}) {
 				elapsed = 0.001
 			}
 
-			currCPU := getProcessCPUTimeSeconds()
-			cpuCores := (currCPU - prevCPU) / elapsed
-			if cpuCores < 0 {
-				cpuCores = 0
+			currentCPU := getProcessCPUTimeSeconds()
+			processCores := (currentCPU - prevCPU) / elapsed
+			if processCores < 0 {
+				processCores = 0
 			}
 
-			cpuQuota, currCgroupCPU, currThrottled, memCurrent, memMax := readCgroupMetrics()
-			containerCPUCores := "n/a"
-			if currCgroupCPU != nil && prevCgroupCPU != nil {
-				delta := *currCgroupCPU - *prevCgroupCPU
+			cpuQuota, currentCgroupCPU, currentThrottled, memoryCurrent, memoryMax := readCgroupMetrics()
+			containerCores := "n/a"
+			if currentCgroupCPU != nil && prevCgroupCPU != nil {
+				delta := *currentCgroupCPU - *prevCgroupCPU
 				if delta < 0 {
 					delta = 0
 				}
-				containerCPUCores = fmt.Sprintf("%.3f", float64(delta)/1e6/elapsed)
+				containerCores = fmt.Sprintf("%.3f", float64(delta)/1e6/elapsed)
 			}
 
-			throttledDelta := "n/a"
-			if currThrottled != nil && prevThrottled != nil {
-				delta := *currThrottled - *prevThrottled
+			throttledDeltaUsec := "n/a"
+			if currentThrottled != nil && prevThrottled != nil {
+				delta := *currentThrottled - *prevThrottled
 				if delta < 0 {
 					delta = 0
 				}
-				throttledDelta = strconv.FormatInt(delta, 10)
+				throttledDeltaUsec = strconv.FormatInt(delta, 10)
 			}
 
 			rssKB, openFDs := readProcMetrics()
+			snapshot := Counters.Snapshot()
+			clientToSSHMbps := calculateMbps(snapshot.TotalClientToSSH, prevSnapshot.TotalClientToSSH, elapsed)
+			sshToClientMbps := calculateMbps(snapshot.TotalSSHToClient, prevSnapshot.TotalSSHToClient, elapsed)
 
-			log.Printf(
-				"[METRICS] active_sessions=%d total_sessions=%d rejected_conns=%d "+
-					"client_to_ssh_bytes=%d ssh_to_client_bytes=%d "+
-					"process_cpu_cores=%.3f container_cpu_cores=%s cpu_quota=%s "+
-					"cpu_throttled_delta=%s rss_kb=%s open_fds=%s "+
-					"cgroup_memory_current=%s cgroup_memory_max=%s scheduler_lag_ms=%.2f",
-				Counters.ActiveSessions.Load(),
-				Counters.TotalSessions.Load(),
-				Counters.RejectedConns.Load(),
-				Counters.TotalClientToSSH.Load(),
-				Counters.TotalSSHToClient.Load(),
-				cpuCores,
-				containerCPUCores,
-				cpuQuota,
-				throttledDelta,
-				rssKB,
-				openFDs,
-				memCurrent,
-				memMax,
-				lagMs,
+			metricsLog.Info("runtime_metrics",
+				"active_connections", snapshot.ActiveConnections,
+				"active_handshakes", snapshot.ActiveHandshakes,
+				"active_ssh_sessions", snapshot.ActiveSSHSessions,
+				"total_connections", snapshot.TotalConnections,
+				"total_ssh_sessions", snapshot.TotalSSHSessions,
+				"peak_active_ssh_sessions", snapshot.PeakActiveSSHSessions,
+				"failed_handshakes", snapshot.FailedHandshakes,
+				"failed_ssh_connections", snapshot.FailedSSHConnections,
+				"session_errors", snapshot.SessionErrors,
+				"rejected_connections", snapshot.RejectedConns,
+				"client_to_ssh_bytes_total", snapshot.TotalClientToSSH,
+				"ssh_to_client_bytes_total", snapshot.TotalSSHToClient,
+				"client_to_ssh_mbps", clientToSSHMbps,
+				"ssh_to_client_mbps", sshToClientMbps,
+				"process_cpu_cores", processCores,
+				"container_cpu_cores", containerCores,
+				"cpu_quota", cpuQuota,
+				"cpu_throttled_delta_usec", throttledDeltaUsec,
+				"rss_kb", rssKB,
+				"open_fds", openFDs,
+				"cgroup_memory_current", memoryCurrent,
+				"cgroup_memory_max", memoryMax,
+				"scheduler_lag_ms", lagMs,
 			)
 
+			if exporter != nil {
+				exporter.Submit(MonitoringSample{
+					Snapshot:        snapshot,
+					ClientToSSHMbps: clientToSSHMbps,
+					SSHToClientMbps: sshToClientMbps,
+					Timestamp:       now,
+				})
+			}
 			prevWall = now
-			prevCPU = currCPU
-			prevCgroupCPU = currCgroupCPU
-			prevThrottled = currThrottled
+			prevCPU = currentCPU
+			prevCgroupCPU = currentCgroupCPU
+			prevThrottled = currentThrottled
+			prevSnapshot = snapshot
 			nextTick = nextTick.Add(interval)
 			if !nextTick.After(now) {
 				nextTick = now.Add(interval)
