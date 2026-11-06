@@ -1,15 +1,15 @@
-# ============================================================
-# GOJO X-RELAY — NGINX SECURITY & STREAM INGRESS CONFIG
-# ============================================================
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Gojo Research
+# GOJO X-RELAY — NGINX LAYER-4 INGRESS
+
 load_module /usr/lib/nginx/modules/ngx_stream_module.so;
 
 worker_processes auto;
-worker_rlimit_nofile 65535;
+worker_rlimit_nofile 16384;
 error_log /dev/stderr info;
 
 events {
-    worker_connections 16384;
-    multi_accept on;
+    worker_connections 8192;
 }
 
 stream {
@@ -20,13 +20,8 @@ stream {
                            'upstream=$upstream_addr';
     access_log /dev/stdout stream_diag;
 
-    # Layer-4 concurrent connection cap per edge IP
-    limit_conn_zone $binary_remote_addr zone=edge_conn_limit:10m;
-
     server {
         listen __PORT__;
-
-        limit_conn edge_conn_limit 128;
 
         proxy_pass 127.0.0.1:8081;
         proxy_timeout 3600s;

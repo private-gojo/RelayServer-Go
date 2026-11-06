@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Gojo Research
+
 package security
 
 import (
@@ -8,7 +11,6 @@ import (
 	"time"
 )
 
-// GuardConfig defines connection limits, rate window, and header rules.
 type GuardConfig struct {
 	MaxActivePerIP   int
 	BurstPerWindow   int
@@ -18,14 +20,13 @@ type GuardConfig struct {
 	HandshakeTimeout time.Duration
 }
 
-// DefaultGuardConfig returns balanced anti-DDoS defaults for Cloud Run + CDN ingress.
 func DefaultGuardConfig() GuardConfig {
 	return GuardConfig{
-		MaxActivePerIP:   64,
-		BurstPerWindow:   120,
+		MaxActivePerIP:   1024,
+		BurstPerWindow:   5000,
 		WindowDuration:   10 * time.Second,
-		BanDuration:      60 * time.Second,
-		MaxHandshakeSize: 16384,
+		BanDuration:      30 * time.Second,
+		MaxHandshakeSize: 16 * 1024,
 		HandshakeTimeout: 4 * time.Second,
 	}
 }
@@ -37,7 +38,6 @@ type ipBucket struct {
 	bannedUntil time.Time
 }
 
-// IngressGuard enforces multi-core thread-safe rate limiting and header inspection.
 type IngressGuard struct {
 	cfg     GuardConfig
 	mu      sync.Mutex
@@ -53,84 +53,98 @@ func NewIngressGuard(cfg GuardConfig) *IngressGuard {
 	return g
 }
 
-// Acquire checks if a peer IP is allowed to open a new connection.
-func (g *IngressGuard) Acquire(peerAddr string) (string, bool) {
-	ip := extractIP(peerAddr)
+func (g *IngressGuard) Acquire(peerIP string) (string, bool) {
+	ip := normalizeIP(peerIP)
+	if ip == "" {
+		return "", true
+	}
 	now := time.Now()
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	b, exists := g.buckets[ip]
+	bucket, exists := g.buckets[ip]
 	if !exists {
-		b = &ipBucket{windowStart: now}
-		g.buckets[ip] = b
+		bucket = &ipBucket{windowStart: now}
+		g.buckets[ip] = bucket
 	}
 
-	if now.Before(b.bannedUntil) {
+	if now.Before(bucket.bannedUntil) {
 		return ip, false
 	}
 
-	if now.Sub(b.windowStart) > g.cfg.WindowDuration {
-		b.windowStart = now
-		b.hits = 0
+	if g.cfg.WindowDuration > 0 && now.Sub(bucket.windowStart) >= g.cfg.WindowDuration {
+		bucket.windowStart = now
+		bucket.hits = 0
 	}
 
-	b.hits++
-	if g.cfg.BurstPerWindow > 0 && b.hits > g.cfg.BurstPerWindow {
-		b.bannedUntil = now.Add(g.cfg.BanDuration)
+	bucket.hits++
+	if g.cfg.BurstPerWindow > 0 && bucket.hits > g.cfg.BurstPerWindow {
+		bucket.bannedUntil = now.Add(g.cfg.BanDuration)
 		return ip, false
 	}
 
-	if g.cfg.MaxActivePerIP > 0 && b.active >= g.cfg.MaxActivePerIP {
+	if g.cfg.MaxActivePerIP > 0 && bucket.active >= g.cfg.MaxActivePerIP {
 		return ip, false
 	}
 
-	b.active++
+	bucket.active++
 	return ip, true
 }
 
-// Release decrements the active connection count for an IP.
 func (g *IngressGuard) Release(ip string) {
+	ip = normalizeIP(ip)
 	if ip == "" {
 		return
 	}
+
 	g.mu.Lock()
-	if b, ok := g.buckets[ip]; ok {
-		b.active--
-		if b.active < 0 {
-			b.active = 0
-		}
+	if bucket, ok := g.buckets[ip]; ok && bucket.active > 0 {
+		bucket.active--
 	}
 	g.mu.Unlock()
 }
 
-// ExtractRealClientIP resolves real client IP from CDN headers (Cloudflare / CloudFront / GFE) if present.
+// Direct Cloud Run run.app ingress appends the observed client address to X-Forwarded-For.
+// Earlier values and client-supplied proxy headers are untrusted.
 func ExtractRealClientIP(headerLines []string, fallbackIP string) string {
+	var forwarded []string
 	for _, line := range headerLines {
-		name, val, ok := strings.Cut(line, ":")
-		if !ok {
+		name, value, ok := strings.Cut(line, ":")
+		if !ok || !strings.EqualFold(strings.TrimSpace(name), "x-forwarded-for") {
 			continue
 		}
-		key := strings.ToLower(strings.TrimSpace(name))
-		v := strings.TrimSpace(val)
-		if v == "" {
-			continue
-		}
-		switch key {
-		case "cf-connecting-ip", "true-client-ip":
-			return v
-		case "x-forwarded-for":
-			first, _, _ := strings.Cut(v, ",")
-			if trimmed := strings.TrimSpace(first); trimmed != "" {
-				return trimmed
+		for _, item := range strings.Split(value, ",") {
+			if ip := normalizeIP(item); ip != "" {
+				forwarded = append(forwarded, ip)
 			}
 		}
 	}
-	return fallbackIP
+
+	if len(forwarded) > 0 {
+		return forwarded[len(forwarded)-1]
+	}
+
+	if fallback := normalizeIP(fallbackIP); fallback != "" {
+		ip := net.ParseIP(fallback)
+		if ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
+			return fallback
+		}
+	}
+	return ""
 }
 
-// FormatHTTPDate returns an RFC1123 GMT date string matching Python's email.utils.formatdate(usegmt=True).
+func normalizeIP(value string) string {
+	value = strings.TrimSpace(value)
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		value = host
+	}
+	if ip := net.ParseIP(strings.Trim(value, "[]")); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
 func FormatHTTPDate() string {
 	return time.Now().UTC().Format(http.TimeFormat)
 }
@@ -138,22 +152,16 @@ func FormatHTTPDate() string {
 func (g *IngressGuard) cleanupLoop() {
 	ticker := time.NewTicker(2 * time.Minute)
 	defer ticker.Stop()
+
 	for range ticker.C {
 		now := time.Now()
 		g.mu.Lock()
-		for ip, b := range g.buckets {
-			if b.active == 0 && now.After(b.bannedUntil) && now.Sub(b.windowStart) > 2*g.cfg.WindowDuration {
+		for ip, bucket := range g.buckets {
+			if bucket.active == 0 && !now.Before(bucket.bannedUntil) &&
+				now.Sub(bucket.windowStart) > 2*g.cfg.WindowDuration {
 				delete(g.buckets, ip)
 			}
 		}
 		g.mu.Unlock()
 	}
-}
-
-func extractIP(addr string) string {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return addr
-	}
-	return host
 }
