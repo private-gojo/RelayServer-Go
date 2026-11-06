@@ -32,7 +32,7 @@ FROM alpine:3.24.3 AS dropbear-builder
 RUN apk add --no-cache \
     build-base=0.5-r4 \
     wget=1.25.0-r3 \
-    zlib-dev=1.3.2-r1 \
+    zlib-dev=1.4-r0 \
     linux-headers=7.0.0-r1 \
     openssl-dev=3.5.9-r0
 
@@ -88,7 +88,7 @@ RUN apk add --no-cache \
     bash=5.3.9-r1 \
     shadow=4.18.0-r1 \
     tzdata=2026f-r0 \
-    zlib=1.3.2-r1 \
+    zlib=1.4-r0 \
     nginx=1.30.6-r0 \
     nginx-mod-stream=1.30.6-r0 \
     netcat-openbsd=1.234.1-r0
