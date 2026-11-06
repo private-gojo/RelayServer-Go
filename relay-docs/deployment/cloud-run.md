@@ -5,7 +5,7 @@
 > **Scope:** Build and deploy the current container to Cloud Run Gen2, configure credentials, and collect runtime logs and custom metrics.
 >
 > **Change record**
-> - **Changed:** Added the Cloud Monitoring runtime service identity permission.
+> - **Changed:** Custom metric writes now use the supported generic_task monitored resource and its required labels.
 > - **Added:** Custom metric setup and exporter verification.
 > - **Removed:** No deployment behavior or existing service settings.
 
@@ -87,32 +87,44 @@ gcloud services enable monitoring.googleapis.com --project PROJECT_ID
 Find the runtime service account configured on the Cloud Run service:
 
 ```bash
-gcloud run services describe x-relay \\
-  --region REGION \\
+gcloud run services describe x-relay \\\
+  --region REGION \\\
   --format='value(spec.template.spec.serviceAccountName)'
 ```
 
 If that field is empty, Cloud Run uses the project's default compute service account. Grant the runtime identity write access:
 
 ```bash
-gcloud projects add-iam-policy-binding PROJECT_ID \\
-  --member="serviceAccount:SERVICE_ACCOUNT_EMAIL" \\
+gcloud projects add-iam-policy-binding PROJECT_ID \\\
+  --member="serviceAccount:SERVICE_ACCOUNT_EMAIL" \\\
   --role="roles/monitoring.metricWriter"
 ```
 
 Grant this role to the Cloud Run runtime identity, not merely to the account that runs the deployment command. The exporter obtains short-lived credentials from the Cloud Run metadata server; no static credentials are added to the image.
 
+The exporter writes custom metrics against the supported `generic_task` monitored resource. Its resource labels map as follows:
+
+| Resource label | Cloud Run value |
+| --- | --- |
+| project_id | Project ID |
+| location | Region |
+| namespace | Service name |
+| job | Revision name |
+| task_id | Instance ID |
+
+The native `cloud_run_revision` resource remains available for Cloud Run's built-in metrics and container logs. It is not used for this custom metrics API write path.
+
 Set CLOUD_MONITORING_ENABLED=false to disable metric export. The default is enabled when the required Cloud Run metadata is present.
 
-After deployment, check for the structured event cloud_monitoring_exporter_started. If custom_metrics_write_failed appears, inspect its error field and verify API enablement and the runtime service account permission.
+After deployment, check for the structured event cloud_monitoring_exporter_started. If custom_metrics_write_failed appears, inspect its error field and verify API enablement, the runtime service account permission, and the monitored-resource labels.
 
 ## Logs and Deployment Checks
 
 After deployment, read the recent service logs:
 
 ```bash
-gcloud run services logs read x-relay \\
-  --region REGION \\
+gcloud run services logs read x-relay \\\
+  --region REGION \\\
   --limit 200
 ```
 
@@ -121,8 +133,8 @@ For structured bridge events, filter by jsonPayload.component in Logs Explorer. 
 Check the latest revision and service status:
 
 ```bash
-gcloud run services describe x-relay \\
-  --region REGION \\
+gcloud run services describe x-relay \\\
+  --region REGION \\\
   --format='yaml(status.url,status.latestReadyRevisionName,status.conditions)'
 ```
 
