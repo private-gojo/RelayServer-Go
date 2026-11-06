@@ -86,7 +86,7 @@ func NewCloudMonitoringExporter(metadata InstanceMetadata) *CloudMonitoringExpor
 		return nil
 	}
 	if metadata.ProjectID == "" || metadata.Location == "" || metadata.ServiceName == "" ||
-		metadata.RevisionName == "" || metadata.ConfigurationName == "" || metadata.InstanceID == "" {
+		metadata.RevisionName == "" || metadata.InstanceID == "" {
 		return nil
 	}
 	return &CloudMonitoringExporter{
@@ -208,13 +208,13 @@ func (e *CloudMonitoringExporter) accessToken(ctx context.Context) (string, erro
 func buildMonitoringTimeSeries(metadata InstanceMetadata, sample MonitoringSample) []monitoringTimeSeries {
 	snapshot := sample.Snapshot
 	resource := monitoringResource{
-		Type: "cloud_run_revision",
+		Type: "generic_task",
 		Labels: map[string]string{
-			"project_id":         metadata.ProjectID,
-			"location":           metadata.Location,
-			"service_name":       metadata.ServiceName,
-			"revision_name":      metadata.RevisionName,
-			"configuration_name": metadata.ConfigurationName,
+			"project_id": metadata.ProjectID,
+			"location":   metadata.Location,
+			"namespace":  metadata.ServiceName,
+			"job":        metadata.RevisionName,
+			"task_id":    metadata.InstanceID,
 		},
 	}
 	labels := map[string]string{"instance_id": metadata.InstanceID}

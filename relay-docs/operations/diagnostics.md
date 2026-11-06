@@ -55,7 +55,17 @@ When running on Cloud Run and metadata is available, the Go bridge writes the fo
 
 custom.googleapis.com/x_relay/*
 
-The exporter sends one bounded batch every 10 seconds and labels each time series with instance_id. Cloud Run revision resource labels identify the service, revision, configuration, project, and region. The exporter uses the Cloud Run service identity and the metadata server token endpoint; no service-account key is stored in the container.
+The exporter sends one bounded batch every 10 seconds. Each time series uses the supported `generic_task` monitored resource with these labels:
+
+| Resource label | Value |
+| --- | --- |
+| project_id | Cloud project ID |
+| location | Cloud Run region |
+| namespace | Cloud Run service name |
+| job | Cloud Run revision name |
+| task_id | Cloud Run instance ID |
+
+The metric also retains its `instance_id` metric label. The exporter uses the Cloud Run service identity and the metadata server token endpoint; no service-account key is stored in the container. Cloud Run container logs continue to use the native `cloud_run_revision` monitored resource; that resource type is not used for custom metric writes.
 
 Required setup:
 
@@ -126,7 +136,7 @@ Do not blindly trust CF-Connecting-IP, True-Client-IP, or arbitrary client-suppl
 | --- | --- |
 | No bridge_ready event | Go process failed before binding or the container did not reach bridge startup |
 | cloud_monitoring_exporter_disabled_or_unavailable | Monitoring is disabled or required Cloud Run metadata was unavailable |
-| custom_metrics_write_failed | Check Monitoring API enablement, runtime service identity, IAM role, and API error body |
+| custom_metrics_write_failed | Check Monitoring API enablement, runtime service identity, IAM role, and the API error body; also confirm the exporter uses the supported generic_task resource |
 | No active_ssh_sessions increase | Handshake did not reach a successful Dropbear backend TCP connection |
 | failed_handshakes increases | Clients are timing out, sending oversized headers, or not completing WebSocket Upgrade |
 | failed_ssh_connections increases | Go bridge could not connect to Dropbear on the configured SSH backend |
