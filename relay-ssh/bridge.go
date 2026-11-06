@@ -269,7 +269,7 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 		log.Printf("[SESSION %d] Rejected real_ip=%s by ingress guard", sessionID, peerIP)
 		return
 	}
-	guardAcquired = true
+	guardAcquired = peerIP != ""
 
 	if !isWSUpgrade {
 		stats.endReason = "http_403_no_websocket_upgrade"
