@@ -21,4 +21,4 @@ Feature branches run formatting, vet, race-enabled tests, guard benchmarks, and 
 
 ## Runtime Guard Notes
 
-The Go bridge parses the original HTTP headers before selecting a client address. For GFE ingress, it uses the second-to-last valid IP in `X-Forwarded-For`, which represents the client address when Google appends the client and load-balancer addresses. Direct Cloud Run testing is required to verify the deployed header path.
+The Go bridge parses the original HTTP headers before selecting a client address. For the current direct `run.app` ingress, it selects the rightmost valid `X-Forwarded-For` address, based on observed direct-ingress behavior. Earlier values and `CF-Connecting-IP` / `True-Client-IP` are not trusted. When no usable client address is present, the guard skips per-IP accounting rather than grouping all sessions under Nginx loopback. Confirm the selected `real_ip` in Cloud Run logs. If ingress later moves behind an external Application Load Balancer, update the trusted-hop selection: that load balancer appends client and forwarding-rule addresses.

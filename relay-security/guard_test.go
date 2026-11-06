@@ -9,22 +9,21 @@ import (
 	"time"
 )
 
-func TestExtractRealClientIPUsesGFEClientPosition(t *testing.T) {
-	headers := []string{"Host: relay.example", "X-Forwarded-For: 203.0.113.99, 198.51.100.20, 192.0.2.1"}
+func TestExtractRealClientIPUsesRightmostCloudRunAddress(t *testing.T) {
+	headers := []string{"Host: relay.example", "X-Forwarded-For: 203.0.113.99, 198.51.100.20"}
 	got := ExtractRealClientIP(headers, "127.0.0.1:8081")
 	if want := "198.51.100.20"; got != want {
 		t.Fatalf("ExtractRealClientIP() = %q, want %q", got, want)
 	}
 }
 
-func TestExtractRealClientIPPrefersCloudflareHeader(t *testing.T) {
+func TestExtractRealClientIPIgnoresUntrustedProxyHeaders(t *testing.T) {
 	headers := []string{
-		"X-Forwarded-For: 203.0.113.99, 198.51.100.20, 192.0.2.1",
 		"CF-Connecting-IP: 203.0.113.44",
+		"True-Client-IP: 203.0.113.45",
 	}
-	got := ExtractRealClientIP(headers, "127.0.0.1:8081")
-	if want := "203.0.113.44"; got != want {
-		t.Fatalf("ExtractRealClientIP() = %q, want %q", got, want)
+	if got := ExtractRealClientIP(headers, "127.0.0.1:8081"); got != "" {
+		t.Fatalf("ExtractRealClientIP() = %q, want empty", got)
 	}
 }
 

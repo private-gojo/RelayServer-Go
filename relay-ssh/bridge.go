@@ -188,6 +188,10 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 		}
 		utilities.Counters.ActiveSessions.Add(-1)
 		durationMs := float64(time.Since(started).Microseconds()) / 1000.0
+		logIP := peerIP
+		if logIP == "" {
+			logIP = "unknown"
+		}
 		log.Printf(
 			"[SESSION %d] closed duration_ms=%.1f handshake_ms=%s ssh_connect_ms=%s "+
 				"peer_ip=%s client_to_ssh_bytes=%d ssh_to_client_bytes=%d "+
@@ -196,7 +200,7 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 			durationMs,
 			stats.handshakeMs,
 			stats.sshConnectMs,
-			peerIP,
+			logIP,
 			stats.clientToSSHBytes,
 			stats.sshToClientBytes,
 			stats.clientToSSHEnd,
@@ -259,7 +263,11 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 	}
 
 	peerIP = security.ExtractRealClientIP(headerLines, peerAddr)
-	log.Printf("[SESSION %d] New connection peer=%s real_ip=%s", sessionID, peerAddr, peerIP)
+	logIP := peerIP
+	if logIP == "" {
+		logIP = "unknown"
+	}
+	log.Printf("[SESSION %d] New connection peer=%s real_ip=%s", sessionID, peerAddr, logIP)
 
 	var allowed bool
 	peerIP, allowed = guard.Acquire(peerIP)

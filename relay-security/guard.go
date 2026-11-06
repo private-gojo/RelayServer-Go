@@ -105,21 +105,9 @@ func (g *IngressGuard) Release(ip string) {
 	g.mu.Unlock()
 }
 
-// GFE appends the client and load-balancer addresses to X-Forwarded-For.
-// Selecting the second-to-last valid address ignores any client-supplied prefix.
+// Direct Cloud Run run.app ingress appends the observed client address to X-Forwarded-For.
+// Earlier values and client-supplied proxy headers are untrusted.
 func ExtractRealClientIP(headerLines []string, fallbackIP string) string {
-	for _, preferred := range []string{"cf-connecting-ip", "true-client-ip"} {
-		for _, line := range headerLines {
-			name, value, ok := strings.Cut(line, ":")
-			if !ok || !strings.EqualFold(strings.TrimSpace(name), preferred) {
-				continue
-			}
-			if ip := normalizeIP(value); ip != "" {
-				return ip
-			}
-		}
-	}
-
 	var forwarded []string
 	for _, line := range headerLines {
 		name, value, ok := strings.Cut(line, ":")
@@ -133,12 +121,10 @@ func ExtractRealClientIP(headerLines []string, fallbackIP string) string {
 		}
 	}
 
-	if len(forwarded) >= 2 {
-		return forwarded[len(forwarded)-2]
+	if len(forwarded) > 0 {
+		return forwarded[len(forwarded)-1]
 	}
-	if len(forwarded) == 1 {
-		return forwarded[0]
-	}
+
 	if fallback := normalizeIP(fallbackIP); fallback != "" {
 		ip := net.ParseIP(fallback)
 		if ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
