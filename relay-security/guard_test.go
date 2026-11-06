@@ -17,10 +17,47 @@ func TestExtractRealClientIPUsesGFEClientPosition(t *testing.T) {
 	}
 }
 
-func TestExtractRealClientIPFallsBackWhenXFFIsIncomplete(t *testing.T) {
-	got := ExtractRealClientIP([]string{"X-Forwarded-For: 203.0.113.99"}, "127.0.0.1:8081")
-	if want := "127.0.0.1"; got != want {
+func TestExtractRealClientIPPrefersCloudflareHeader(t *testing.T) {
+	headers := []string{
+		"X-Forwarded-For: 203.0.113.99, 198.51.100.20, 192.0.2.1",
+		"CF-Connecting-IP: 203.0.113.44",
+	}
+	got := ExtractRealClientIP(headers, "127.0.0.1:8081")
+	if want := "203.0.113.44"; got != want {
 		t.Fatalf("ExtractRealClientIP() = %q, want %q", got, want)
+	}
+}
+
+func TestExtractRealClientIPAcceptsSingleForwardedAddress(t *testing.T) {
+	got := ExtractRealClientIP([]string{"X-Forwarded-For: 198.51.100.9"}, "127.0.0.1:8081")
+	if want := "198.51.100.9"; got != want {
+		t.Fatalf("ExtractRealClientIP() = %q, want %q", got, want)
+	}
+}
+
+func TestExtractRealClientIPUsesOnlyPublicPeerFallback(t *testing.T) {
+	if got := ExtractRealClientIP(nil, "127.0.0.1:8081"); got != "" {
+		t.Fatalf("loopback fallback = %q, want empty", got)
+	}
+	if got := ExtractRealClientIP(nil, "203.0.113.7:443"); got != "203.0.113.7" {
+		t.Fatalf("public peer fallback = %q, want 203.0.113.7", got)
+	}
+}
+
+func TestGuardSkipsPerIPBucketWhenClientIPIsUnavailable(t *testing.T) {
+	guard := NewIngressGuard(DefaultGuardConfig())
+
+	ip, allowed := guard.Acquire("")
+	if !allowed || ip != "" {
+		t.Fatalf("Acquire(empty) = (%q, %v), want (empty, true)", ip, allowed)
+	}
+
+	guard.Release(ip)
+	guard.mu.Lock()
+	bucketCount := len(guard.buckets)
+	guard.mu.Unlock()
+	if bucketCount != 0 {
+		t.Fatalf("unknown client created %d shared bucket(s)", bucketCount)
 	}
 }
 
