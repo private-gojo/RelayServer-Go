@@ -56,7 +56,7 @@ func NewIngressGuard(cfg GuardConfig) *IngressGuard {
 func (g *IngressGuard) Acquire(peerIP string) (string, bool) {
 	ip := normalizeIP(peerIP)
 	if ip == "" {
-		ip = "unknown"
+		return "", true
 	}
 	now := time.Now()
 
@@ -108,24 +108,44 @@ func (g *IngressGuard) Release(ip string) {
 // GFE appends the client and load-balancer addresses to X-Forwarded-For.
 // Selecting the second-to-last valid address ignores any client-supplied prefix.
 func ExtractRealClientIP(headerLines []string, fallbackIP string) string {
-	var forwarded []net.IP
+	for _, preferred := range []string{"cf-connecting-ip", "true-client-ip"} {
+		for _, line := range headerLines {
+			name, value, ok := strings.Cut(line, ":")
+			if !ok || !strings.EqualFold(strings.TrimSpace(name), preferred) {
+				continue
+			}
+			if ip := normalizeIP(value); ip != "" {
+				return ip
+			}
+		}
+	}
 
+	var forwarded []string
 	for _, line := range headerLines {
 		name, value, ok := strings.Cut(line, ":")
 		if !ok || !strings.EqualFold(strings.TrimSpace(name), "x-forwarded-for") {
 			continue
 		}
 		for _, item := range strings.Split(value, ",") {
-			if ip := net.ParseIP(strings.TrimSpace(item)); ip != nil {
+			if ip := normalizeIP(item); ip != "" {
 				forwarded = append(forwarded, ip)
 			}
 		}
 	}
 
 	if len(forwarded) >= 2 {
-		return forwarded[len(forwarded)-2].String()
+		return forwarded[len(forwarded)-2]
 	}
-	return normalizeIP(fallbackIP)
+	if len(forwarded) == 1 {
+		return forwarded[0]
+	}
+	if fallback := normalizeIP(fallbackIP); fallback != "" {
+		ip := net.ParseIP(fallback)
+		if ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
+			return fallback
+		}
+	}
+	return ""
 }
 
 func normalizeIP(value string) string {
