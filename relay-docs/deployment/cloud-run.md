@@ -87,16 +87,16 @@ gcloud services enable monitoring.googleapis.com --project PROJECT_ID
 Find the runtime service account configured on the Cloud Run service:
 
 ```bash
-gcloud run services describe x-relay \\\
-  --region REGION \\\
+gcloud run services describe x-relay \\
+  --region REGION \\
   --format='value(spec.template.spec.serviceAccountName)'
 ```
 
 If that field is empty, Cloud Run uses the project's default compute service account. Grant the runtime identity write access:
 
 ```bash
-gcloud projects add-iam-policy-binding PROJECT_ID \\\
-  --member="serviceAccount:SERVICE_ACCOUNT_EMAIL" \\\
+gcloud projects add-iam-policy-binding PROJECT_ID \\
+  --member="serviceAccount:SERVICE_ACCOUNT_EMAIL" \\
   --role="roles/monitoring.metricWriter"
 ```
 
@@ -123,8 +123,8 @@ After deployment, check for the structured event cloud_monitoring_exporter_start
 After deployment, read the recent service logs:
 
 ```bash
-gcloud run services logs read x-relay \\\
-  --region REGION \\\
+gcloud run services logs read x-relay \\
+  --region REGION \\
   --limit 200
 ```
 
@@ -133,8 +133,8 @@ For structured bridge events, filter by jsonPayload.component in Logs Explorer. 
 Check the latest revision and service status:
 
 ```bash
-gcloud run services describe x-relay \\\
-  --region REGION \\\
+gcloud run services describe x-relay \\
+  --region REGION \\
   --format='yaml(status.url,status.latestReadyRevisionName,status.conditions)'
 ```
 
