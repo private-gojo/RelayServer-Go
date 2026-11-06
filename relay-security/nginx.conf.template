@@ -1,0 +1,37 @@
+# ============================================================
+# GOJO X-RELAY — NGINX SECURITY & STREAM INGRESS CONFIG
+# ============================================================
+load_module /usr/lib/nginx/modules/ngx_stream_module.so;
+
+worker_processes auto;
+worker_rlimit_nofile 65535;
+error_log /dev/stderr info;
+
+events {
+    worker_connections 16384;
+    multi_accept on;
+}
+
+stream {
+    log_format stream_diag '$time_iso8601 connection=$connection remote=$remote_addr:$remote_port '
+                           'status=$status session_time=$session_time '
+                           'upstream_connect_time=$upstream_connect_time '
+                           'bytes_sent=$bytes_sent bytes_received=$bytes_received '
+                           'upstream=$upstream_addr';
+    access_log /dev/stdout stream_diag;
+
+    # Layer-4 concurrent connection cap per edge IP
+    limit_conn_zone $binary_remote_addr zone=edge_conn_limit:10m;
+
+    server {
+        listen __PORT__;
+
+        limit_conn edge_conn_limit 128;
+
+        proxy_pass 127.0.0.1:8081;
+        proxy_timeout 3600s;
+        proxy_connect_timeout 5s;
+        proxy_buffer_size 128k;
+        proxy_socket_keepalive on;
+    }
+}
