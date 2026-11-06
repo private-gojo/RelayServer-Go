@@ -128,8 +128,7 @@ func isTimeoutError(err error) bool {
 }
 
 func inspectHandshakeHeaders(headerBlock []byte) (isWSUpgrade bool, isHealthCheck bool, headerLines []string) {
-	lines := strings.Split(string(headerBlock), "
-")
+	lines := strings.Split(string(headerBlock), "\r\n")
 	if len(lines) == 0 {
 		return false, false, nil
 	}
@@ -217,9 +216,7 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 		n, err := clientConn.Read(tmp)
 		if n > 0 {
 			raw = append(raw, tmp[:n]...)
-			if idx := bytes.Index(raw, []byte("
-
-")); idx >= 0 {
+			if idx := bytes.Index(raw, []byte("\r\n\r\n")); idx >= 0 {
 				headerEnd = idx
 				break
 			}
@@ -257,13 +254,7 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 	if isHealthCheck {
 		stats.endReason = "healthcheck_200"
 		_ = writeHTTPResponse(clientConn,
-			"HTTP/1.1 200 OK
-Content-Type: text/plain
-Content-Length: 3
-Connection: close
-
-OK
-")
+			"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\nConnection: close\r\n\r\nOK\n")
 		return
 	}
 
@@ -284,32 +275,19 @@ OK
 		stats.endReason = "http_403_no_websocket_upgrade"
 		log.Printf("[SESSION %d] No websocket upgrade header found, sending 403", sessionID)
 		_ = writeHTTPResponse(clientConn,
-			"HTTP/1.1 403 Forbidden
-Content-Length: 0
-Connection: close
-
-")
+			"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		return
 	}
 
 	response := fmt.Sprintf(
-		"HTTP/1.1 101 Switching Protocols
-"+
-			"Upgrade: websocket
-"+
-			"Connection: keep-alive, Upgrade
-"+
-			"Date: %s
-"+
-			"Server: Google Frontend
-"+
-			"X-Powered-By: RelayServer-Go
-"+
-			"X-Origin-To: X-Sorcerer
-"+
-			"X-Source-Code: https://github.com/private-gojo/RelayServer-Go
-
-",
+		"HTTP/1.1 101 Switching Protocols\r\n"+
+			"Upgrade: websocket\r\n"+
+			"Connection: keep-alive, Upgrade\r\n"+
+			"Date: %s\r\n"+
+			"Server: Google Frontend\r\n"+
+			"X-Powered-By: RelayServer-Go\r\n"+
+			"X-Origin-To: X-Sorcerer\r\n"+
+			"X-Source-Code: https://github.com/private-gojo/RelayServer-Go\r\n\r\n",
 		security.FormatHTTPDate(),
 	)
 	if err := writeHTTPResponse(clientConn, response); err != nil {
