@@ -1,0 +1,101 @@
+name: "WP: RelayServer-Go | Build, Test, Benchmark and Publish"
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: "WP: Go Validation and Container Build"
+    runs-on: ubuntu-latest
+    steps:
+      - name: "WP1: Checkout Repository"
+        uses: actions/checkout@v4
+
+      - name: "WP2: Set up Go 1.27.3"
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.3"
+          cache-dependency-path: go.mod
+
+      - name: "WP3: Verify Go Formatting"
+        shell: bash
+        run: |
+          files="$(gofmt -l relay-ssh/*.go relay-security/*.go relay-utilities/*.go)"
+          if [[ -n "$files" ]]; then
+            printf '%s\n' "$files"
+            exit 1
+          fi
+          echo "Go formatting check passed."
+
+      - name: "WP4: Run go vet"
+        run: go vet ./...
+
+      - name: "WP5: Run Unit and Race Tests"
+        run: go test -race ./...
+
+      - name: "WP6: Run Guard and Bridge Benchmarks"
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -run '^$' -bench . -benchmem ./... | tee benchmark.txt
+
+      - name: "WP7: Upload Benchmark Results"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relayserver-go-benchmarks-${{ github.sha }}
+          path: benchmark.txt
+          if-no-files-found: ignore
+
+      - name: "WP8: Verify Go Bridge Build"
+        run: CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /tmp/x-relay-bridge ./relay-ssh
+
+      - name: "WP9: Log in to Docker Hub"
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: "WP10: Set up Docker Buildx"
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        uses: docker/setup-buildx-action@v3
+
+      - name: "WP11: Build Pull Request Image"
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: x-relay:ci-${{ github.sha }}
+
+      - name: "WP12: Publish Feature Branch Image"
+        if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/x-relay:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: "WP13: Publish Main Images"
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/x-relay:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/x-relay:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

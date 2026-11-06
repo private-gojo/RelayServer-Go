@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Gojo Research
+
 package main
 
 import (
@@ -21,12 +24,12 @@ import (
 )
 
 const (
-	defaultListenAddr = "0.0.0.0:8080"
-	defaultSSHAddr    = "127.0.0.1:2224"
-	bufSize           = 65536
-	idleTimeout       = 600 * time.Second
-	handshakeTimeout  = 4 * time.Second
-	maxHeaderSize     = 16384
+	defaultSSHAddr   = "127.0.0.1:2224"
+	bufSize          = 256 * 1024
+	idleTimeout      = 600 * time.Second
+	handshakeTimeout = 4 * time.Second
+	maxHeaderSize    = 16 * 1024
+	shutdownGrace    = 10 * time.Second
 )
 
 var bufferPool = sync.Pool{
@@ -36,6 +39,8 @@ var bufferPool = sync.Pool{
 	},
 }
 
+var trackedConns sync.Map
+
 type sessionStats struct {
 	clientToSSHBytes uint64
 	sshToClientBytes uint64
@@ -44,6 +49,23 @@ type sessionStats struct {
 	handshakeMs      string
 	sshConnectMs     string
 	endReason        string
+}
+
+func trackConn(conn net.Conn) {
+	trackedConns.Store(conn, struct{}{})
+}
+
+func untrackConn(conn net.Conn) {
+	trackedConns.Delete(conn)
+}
+
+func closeTrackedConns() {
+	trackedConns.Range(func(key, _ any) bool {
+		if conn, ok := key.(net.Conn); ok {
+			_ = conn.Close()
+		}
+		return true
+	})
 }
 
 func relayLeg(src net.Conn, dst net.Conn, isClientToSSH bool) (uint64, string) {
@@ -79,18 +101,18 @@ func relayLeg(src net.Conn, dst net.Conn, isClientToSSH bool) (uint64, string) {
 			}
 		}
 		if err != nil {
-			if errors.Is(err, io.EOF) {
+			switch {
+			case errors.Is(err, io.EOF):
 				endReason = "eof"
-			} else if isTimeoutError(err) {
+			case isTimeoutError(err):
 				endReason = "idle_timeout"
-			} else {
+			default:
 				endReason = "read_error"
 			}
 			break
 		}
 	}
 
-	// Half-close the destination write side so reverse traffic can finish cleanly (exact proxy.py write_eof behavior).
 	if tcpDst, ok := dst.(*net.TCPConn); ok {
 		_ = tcpDst.CloseWrite()
 	} else {
@@ -105,10 +127,9 @@ func isTimeoutError(err error) bool {
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
-// inspectHandshakeHeaders parses HTTP headers case-insensitively and checks for Upgrade: websocket tokens
-// or /healthz probe requests.
 func inspectHandshakeHeaders(headerBlock []byte) (isWSUpgrade bool, isHealthCheck bool, headerLines []string) {
-	lines := strings.Split(string(headerBlock), "\r\n")
+	lines := strings.Split(string(headerBlock), "
+")
 	if len(lines) == 0 {
 		return false, false, nil
 	}
@@ -120,15 +141,13 @@ func inspectHandshakeHeaders(headerBlock []byte) (isWSUpgrade bool, isHealthChec
 
 	for _, line := range lines[1:] {
 		name, value, found := strings.Cut(line, ":")
-		if !found {
+		if !found || !strings.EqualFold(strings.TrimSpace(name), "upgrade") {
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(name), "upgrade") {
-			for _, token := range strings.Split(value, ",") {
-				if strings.EqualFold(strings.TrimSpace(token), "websocket") {
-					isWSUpgrade = true
-					break
-				}
+		for _, token := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "websocket") {
+				isWSUpgrade = true
+				break
 			}
 		}
 	}
@@ -136,7 +155,18 @@ func inspectHandshakeHeaders(headerBlock []byte) (isWSUpgrade bool, isHealthChec
 	return isWSUpgrade, false, lines[1:]
 }
 
+func writeHTTPResponse(conn net.Conn, response string) error {
+	_, err := io.WriteString(conn, response)
+	return err
+}
+
 func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGuard) {
+	trackConn(clientConn)
+	defer func() {
+		untrackConn(clientConn)
+		_ = clientConn.Close()
+	}()
+
 	sessionID := utilities.Counters.SessionSeq.Add(1)
 	utilities.Counters.ActiveSessions.Add(1)
 	utilities.Counters.TotalSessions.Add(1)
@@ -150,21 +180,24 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 	}
 	started := time.Now()
 	peerAddr := clientConn.RemoteAddr().String()
-	peerIP, allowed := guard.Acquire(peerAddr)
+	peerIP := security.ExtractRealClientIP(nil, peerAddr)
+	guardAcquired := false
 
 	defer func() {
-		guard.Release(peerIP)
-		_ = clientConn.Close()
+		if guardAcquired {
+			guard.Release(peerIP)
+		}
 		utilities.Counters.ActiveSessions.Add(-1)
 		durationMs := float64(time.Since(started).Microseconds()) / 1000.0
 		log.Printf(
 			"[SESSION %d] closed duration_ms=%.1f handshake_ms=%s ssh_connect_ms=%s "+
-				"client_to_ssh_bytes=%d ssh_to_client_bytes=%d "+
+				"peer_ip=%s client_to_ssh_bytes=%d ssh_to_client_bytes=%d "+
 				"client_to_ssh_end=%s ssh_to_client_end=%s reason=%s",
 			sessionID,
 			durationMs,
 			stats.handshakeMs,
 			stats.sshConnectMs,
+			peerIP,
 			stats.clientToSSHBytes,
 			stats.sshToClientBytes,
 			stats.clientToSSHEnd,
@@ -172,12 +205,6 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 			stats.endReason,
 		)
 	}()
-
-	if !allowed {
-		utilities.Counters.RejectedConns.Add(1)
-		stats.endReason = "security_rate_limited"
-		return
-	}
 
 	handshakeStarted := time.Now()
 	_ = clientConn.SetDeadline(handshakeStarted.Add(handshakeTimeout))
@@ -190,7 +217,9 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 		n, err := clientConn.Read(tmp)
 		if n > 0 {
 			raw = append(raw, tmp[:n]...)
-			if idx := bytes.Index(raw, []byte("\r\n\r\n")); idx >= 0 {
+			if idx := bytes.Index(raw, []byte("
+
+")); idx >= 0 {
 				headerEnd = idx
 				break
 			}
@@ -200,14 +229,15 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 			}
 		}
 		if err != nil {
-			if errors.Is(err, io.EOF) && len(raw) == 0 {
+			switch {
+			case errors.Is(err, io.EOF) && len(raw) == 0:
 				stats.endReason = "client_closed_during_handshake"
-			} else if isTimeoutError(err) {
+			case isTimeoutError(err):
 				stats.endReason = "handshake_timeout"
 				log.Printf("[SESSION %d] Handshake read timed out, dropping", sessionID)
-			} else {
+			default:
 				stats.endReason = "handshake_error"
-				log.Printf("[SESSION %d] Handshake error: %v", sessionID, err)
+				log.Printf("[SESSION %d] Handshake read failed: %v", sessionID, err)
 			}
 			return
 		}
@@ -222,44 +252,71 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 
 	headerBlock := raw[:headerEnd-4]
 	leftover := raw[headerEnd:]
-
 	isWSUpgrade, isHealthCheck, headerLines := inspectHandshakeHeaders(headerBlock)
-	realIP := security.ExtractRealClientIP(headerLines, peerIP)
-	log.Printf("[SESSION %d] New connection from %s (real_ip=%s)", sessionID, peerAddr, realIP)
 
 	if isHealthCheck {
 		stats.endReason = "healthcheck_200"
-		_, _ = clientConn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\nConnection: close\r\n\r\nOK\n"))
+		_ = writeHTTPResponse(clientConn,
+			"HTTP/1.1 200 OK
+Content-Type: text/plain
+Content-Length: 3
+Connection: close
+
+OK
+")
 		return
 	}
 
-	if isWSUpgrade {
-		resp := fmt.Sprintf(
-			"HTTP/1.1 101 Switching Protocols\r\n"+
-				"Upgrade: websocket\r\n"+
-				"Connection: Upgrade\r\n"+
-				"Date: %s\r\n"+
-				"Server: cloudflare\r\n\r\n",
-			security.FormatHTTPDate(),
-		)
-		if _, err := clientConn.Write([]byte(resp)); err != nil {
-			stats.endReason = "handshake_write_error"
-			return
-		}
-	} else {
+	peerIP = security.ExtractRealClientIP(headerLines, peerAddr)
+	log.Printf("[SESSION %d] New connection peer=%s real_ip=%s", sessionID, peerAddr, peerIP)
+
+	var allowed bool
+	peerIP, allowed = guard.Acquire(peerIP)
+	if !allowed {
+		utilities.Counters.RejectedConns.Add(1)
+		stats.endReason = "security_rate_limited"
+		log.Printf("[SESSION %d] Rejected real_ip=%s by ingress guard", sessionID, peerIP)
+		return
+	}
+	guardAcquired = true
+
+	if !isWSUpgrade {
 		stats.endReason = "http_403_no_websocket_upgrade"
-		log.Printf("[SESSION %d] No websocket upgrade header found, sending 403 and dropping", sessionID)
-		_, _ = clientConn.Write([]byte(
-			"HTTP/1.1 403 Forbidden\r\n" +
-				"Content-Type: text/plain\r\n" +
-				"Content-Length: 9\r\n" +
-				"Connection: close\r\n\r\n" +
-				"Forbidden",
-		))
+		log.Printf("[SESSION %d] No websocket upgrade header found, sending 403", sessionID)
+		_ = writeHTTPResponse(clientConn,
+			"HTTP/1.1 403 Forbidden
+Content-Length: 0
+Connection: close
+
+")
 		return
 	}
 
-	// Clear handshake deadline before entering tunnel phase
+	response := fmt.Sprintf(
+		"HTTP/1.1 101 Switching Protocols
+"+
+			"Upgrade: websocket
+"+
+			"Connection: keep-alive, Upgrade
+"+
+			"Date: %s
+"+
+			"Server: Google Frontend
+"+
+			"X-Powered-By: RelayServer-Go
+"+
+			"X-Origin-To: X-Sorcerer
+"+
+			"X-Source-Code: https://github.com/private-gojo/RelayServer-Go
+
+",
+		security.FormatHTTPDate(),
+	)
+	if err := writeHTTPResponse(clientConn, response); err != nil {
+		stats.endReason = "handshake_write_error"
+		return
+	}
+
 	_ = clientConn.SetDeadline(time.Time{})
 
 	sshConnectStarted := time.Now()
@@ -267,24 +324,27 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 	stats.sshConnectMs = fmt.Sprintf("%.1f", float64(time.Since(sshConnectStarted).Microseconds())/1000.0)
 	if err != nil {
 		stats.endReason = "ssh_connect_error"
-		log.Printf("[SESSION %d] Could not reach dropbear on %s: %v", sessionID, sshAddr, err)
+		log.Printf("[SESSION %d] Could not reach Dropbear on %s: %v", sessionID, sshAddr, err)
 		return
 	}
-	defer sshConn.Close()
+	trackConn(sshConn)
+	defer func() {
+		untrackConn(sshConn)
+		_ = sshConn.Close()
+	}()
 
 	utilities.OptimizeSocket(clientConn)
 	utilities.OptimizeSocket(sshConn)
 
-	// Preserve pipelined SSH client identification bytes sent immediately after \r\n\r\n
 	if len(leftover) > 0 {
 		_ = sshConn.SetWriteDeadline(time.Now().Add(idleTimeout))
-		written, err := sshConn.Write(leftover)
+		written, writeErr := io.Copy(sshConn, bytes.NewReader(leftover))
 		if written > 0 {
 			u := uint64(written)
 			stats.clientToSSHBytes += u
 			utilities.Counters.TotalClientToSSH.Add(u)
 		}
-		if err != nil {
+		if writeErr != nil {
 			stats.endReason = "ssh_leftover_write_error"
 			return
 		}
@@ -324,8 +384,8 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 }
 
 func envOrDefault(key, fallback string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
 	}
 	return fallback
 }
@@ -334,9 +394,8 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.SetPrefix("[X-RELAY-BRIDGE] ")
 
-	// Enable full multi-core parallelism across all available vCPUs
 	numCPU := runtime.NumCPU()
-	runtime.GOMAXPROCS(numCPU)
+	maxProcs := runtime.GOMAXPROCS(0)
 
 	listenPort := envOrDefault("BRIDGE_PORT", "")
 	listenAddr := envOrDefault("BRIDGE_LISTEN_ADDR", "")
@@ -353,6 +412,15 @@ func main() {
 	sshAddr := envOrDefault("SSH_BACKEND_ADDR", defaultSSHAddr)
 	guard := security.NewIngressGuard(security.DefaultGuardConfig())
 
+	log.Printf("[BOOT] runtime=%s online_cpus=%d gomaxprocs=%d", runtime.Version(), numCPU, maxProcs)
+	log.Printf("[BOOT] bridge_listen=%s ssh_backend=%s buffer_size=%d idle_timeout=%s handshake_timeout=%s",
+		listenAddr, sshAddr, bufSize, idleTimeout, handshakeTimeout)
+	log.Printf("[BOOT] ingress_guard max_active_per_ip=%d burst_per_window=%d window=%s ban=%s",
+		security.DefaultGuardConfig().MaxActivePerIP,
+		security.DefaultGuardConfig().BurstPerWindow,
+		security.DefaultGuardConfig().WindowDuration,
+		security.DefaultGuardConfig().BanDuration)
+
 	stopMetrics := make(chan struct{})
 	go utilities.StartMetricsLoop(stopMetrics)
 
@@ -360,28 +428,58 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to bind %s: %v", listenAddr, err)
 	}
-	log.Printf("Go multi-core bridge online (GOMAXPROCS=%d) listening on %s -> forwarding to %s", numCPU, listenAddr, sshAddr)
+	log.Printf("[BOOT] Go bridge ready; listening on %s -> %s", listenAddr, sshAddr)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		sig := <-sigCh
-		log.Printf("Received %v, initiating graceful shutdown...", sig)
-		close(stopMetrics)
+		log.Printf("[SHUTDOWN] received %v; closing listener", sig)
 		_ = listener.Close()
-		os.Exit(0)
 	}()
 
+	var sessions sync.WaitGroup
 	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				return
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			if errors.Is(acceptErr, net.ErrClosed) {
+				break
 			}
-			log.Printf("Accept error: %v", err)
+			log.Printf("[WARN] accept failed: %v", acceptErr)
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
-		go handleClient(conn, sshAddr, guard)
+		sessions.Add(1)
+		go func(conn net.Conn) {
+			defer sessions.Done()
+			handleClient(conn, sshAddr, guard)
+		}(conn)
 	}
+
+	signal.Stop(sigCh)
+	close(stopMetrics)
+	log.Printf("[SHUTDOWN] waiting up to %s for active sessions", shutdownGrace)
+
+	done := make(chan struct{})
+	go func() {
+		sessions.Wait()
+		close(done)
+	}()
+
+	timer := time.NewTimer(shutdownGrace)
+	defer timer.Stop()
+	select {
+	case <-done:
+		log.Printf("[SHUTDOWN] all sessions closed cleanly")
+	case <-timer.C:
+		log.Printf("[SHUTDOWN] grace period expired; closing tracked connections")
+		closeTrackedConns()
+		select {
+		case <-done:
+			log.Printf("[SHUTDOWN] active sessions stopped")
+		case <-time.After(2 * time.Second):
+			log.Printf("[SHUTDOWN] some sessions did not stop within the final timeout")
+		}
+	}
+	log.Printf("[SHUTDOWN] bridge stopped")
 }

@@ -1,6 +1,8 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Gojo Research
 # ============================================================
-# GOJO X-RELAY — CONTAINER ENTRYPOINT (relay-utilities)
+# GOJO X-RELAY — CONTAINER ENTRYPOINT
 # ============================================================
 
 if ! grep -q "/bin/false" /etc/shells; then
@@ -17,7 +19,7 @@ if [ -n "$ACCOUNTS" ]; then
     done
 else
     id -u gojo &>/dev/null || adduser -D -s /bin/false gojo
-    echo "gojo:gojo" | chpasswd
+    echo "gojo:xrelay" | chpasswd
 fi
 
 # Generate full suite of Dropbear host keys (RSA, ECDSA, Ed25519)
