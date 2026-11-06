@@ -77,6 +77,8 @@ Set CLOUD_MONITORING_ENABLED=false to disable custom metric export. If required 
 
 Cloud Monitoring ingestion is asynchronous; graphs are not frame-by-frame live. Use the 10-second per-instance JSON logs for near-live inspection and Cloud Monitoring for aggregated charts and alerts.
 
+All exported custom metrics are GAUGE time series. `total_*` and `*_bytes_total` fields are per-instance counter snapshots represented as gauges, not Cloud Monitoring CUMULATIVE metrics. For service-wide active connection or session totals, chart `active_ssh_sessions` (or the relevant active metric) with SUM aggregation across the `instance_id` label. Do not sum per-instance peak values to infer a simultaneous service-wide peak.
+
 ## Resource Metrics
 
 | Field | Meaning |
