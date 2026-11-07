@@ -225,6 +225,14 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 		utilities.Counters.HandshakeFinished(success)
 	}
 
+	cancelHandshake := func() {
+		if !handshakePending {
+			return
+		}
+		handshakePending = false
+		utilities.Counters.HandshakeCancelled()
+	}
+
 	defer func() {
 		finishHandshake(false)
 		if activeSSHSession {
@@ -286,6 +294,7 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 		if readErr != nil {
 			switch {
 			case errors.Is(readErr, io.EOF) && len(raw) == 0:
+				cancelHandshake()
 				stats.endReason = "client_closed_during_handshake"
 			case isTimeoutError(readErr):
 				stats.endReason = "handshake_timeout"
@@ -330,6 +339,7 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 	var allowed bool
 	peerIP, allowed = guard.Acquire(peerIP)
 	if !allowed {
+		cancelHandshake()
 		utilities.Counters.RejectedConns.Add(1)
 		stats.endReason = "security_rate_limited"
 		bridgeLog.Warn("connection_rejected", "session_id", sessionID, "peer_ip", peerIP, "component_reason", "ingress_guard")
