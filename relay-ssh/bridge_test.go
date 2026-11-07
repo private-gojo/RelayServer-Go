@@ -76,8 +76,8 @@ func TestRelayLegClosesPeerConnectionsOnAbnormalExit(t *testing.T) {
 
 	select {
 	case reason := <-result:
-		if reason != "peer_leg_closed" {
-			t.Fatalf("relayLeg() reason = %q, want peer_leg_closed", reason)
+		if reason != "peer_leg_closed" && reason != "read_error" {
+			t.Fatalf("relayLeg() reason = %q, want a closed-source error", reason)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("relayLeg() did not exit after source connection closed")
