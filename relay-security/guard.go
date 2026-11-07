@@ -78,13 +78,13 @@ func (g *IngressGuard) Acquire(peerIP string) (string, bool) {
 		bucket.hits = 0
 	}
 
-	bucket.hits++
-	if g.cfg.BurstPerWindow > 0 && bucket.hits > g.cfg.BurstPerWindow {
-		bucket.bannedUntil = now.Add(g.cfg.BanDuration)
+	if g.cfg.MaxActivePerIP > 0 && bucket.active >= g.cfg.MaxActivePerIP {
 		return ip, false
 	}
 
-	if g.cfg.MaxActivePerIP > 0 && bucket.active >= g.cfg.MaxActivePerIP {
+	bucket.hits++
+	if g.cfg.BurstPerWindow > 0 && bucket.hits > g.cfg.BurstPerWindow {
+		bucket.bannedUntil = now.Add(g.cfg.BanDuration)
 		return ip, false
 	}
 
