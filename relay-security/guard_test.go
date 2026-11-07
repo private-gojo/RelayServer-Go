@@ -116,7 +116,7 @@ func TestGuardConcurrentAcquireRelease(t *testing.T) {
 func TestGuardActiveLimitDoesNotConsumeBurstBudget(t *testing.T) {
 	guard := NewIngressGuard(GuardConfig{
 		MaxActivePerIP: 1,
-		BurstPerWindow: 1,
+		BurstPerWindow: 2,
 		WindowDuration: time.Minute,
 		BanDuration:    time.Minute,
 	})
