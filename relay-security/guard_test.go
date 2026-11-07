@@ -112,3 +112,25 @@ func TestGuardConcurrentAcquireRelease(t *testing.T) {
 		t.Fatalf("active count = %d, want 0", active)
 	}
 }
+
+func TestGuardActiveLimitDoesNotConsumeBurstBudget(t *testing.T) {
+	guard := NewIngressGuard(GuardConfig{
+		MaxActivePerIP: 1,
+		BurstPerWindow: 2,
+		WindowDuration: time.Minute,
+		BanDuration:    time.Minute,
+	})
+
+	ip, allowed := guard.Acquire("203.0.113.8")
+	if !allowed {
+		t.Fatal("first Acquire() rejected")
+	}
+	if _, allowed = guard.Acquire("203.0.113.8"); allowed {
+		t.Fatal("second Acquire() unexpectedly allowed")
+	}
+
+	guard.Release(ip)
+	if _, allowed = guard.Acquire("203.0.113.8"); !allowed {
+		t.Fatal("active-limit rejection consumed burst budget and caused a ban")
+	}
+}

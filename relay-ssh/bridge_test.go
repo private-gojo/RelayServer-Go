@@ -3,7 +3,15 @@
 
 package main
 
-import "testing"
+import (
+	"io"
+	"net"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/private-gojo/RelayServer-Go/relay-security"
+)
 
 func TestInspectHandshakeHeadersWebSocketTokens(t *testing.T) {
 	headers := []byte("GET / HTTP/1.1\r\nHost: relay.example\r\nConnection: keep-alive, Upgrade\r\nUpgrade: WebSocket\r\n")
@@ -39,7 +47,7 @@ func TestRelayEndReason(t *testing.T) {
 		{name: "normal EOF", clientToSSH: "eof", sshToClient: "eof", want: "relay_complete"},
 		{name: "read error", clientToSSH: "read_error", sshToClient: "eof", want: "relay_read_error"},
 		{name: "write error", clientToSSH: "eof", sshToClient: "write_error", want: "relay_write_error"},
-		{name: "idle timeout remains normal close", clientToSSH: "idle_timeout", sshToClient: "eof", want: "relay_complete"},
+		{name: "idle timeout is reported", clientToSSH: "idle_timeout", sshToClient: "eof", want: "relay_idle_timeout"},
 	}
 
 	for _, test := range tests {
@@ -48,5 +56,63 @@ func TestRelayEndReason(t *testing.T) {
 				t.Fatalf("relayEndReason() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestRelayLegClosesPeerConnectionsOnAbnormalExit(t *testing.T) {
+	src, srcPeer := net.Pipe()
+	dst, dstPeer := net.Pipe()
+	defer srcPeer.Close()
+	defer dstPeer.Close()
+
+	result := make(chan string, 1)
+	go func() {
+		_, reason := relayLeg(src, dst, true)
+		result <- reason
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	_ = src.Close()
+
+	select {
+	case reason := <-result:
+		if reason != "peer_leg_closed" && reason != "read_error" {
+			t.Fatalf("relayLeg() reason = %q, want a closed-source error", reason)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("relayLeg() did not exit after source connection closed")
+	}
+
+	_ = dstPeer.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := dstPeer.Read(make([]byte, 1)); err == nil {
+		t.Fatal("destination peer remained open after abnormal relay exit")
+	}
+}
+
+func TestHandleClientReturns502WhenSSHBackendIsUnavailable(t *testing.T) {
+	clientConn, bridgeConn := net.Pipe()
+	guard := security.NewIngressGuard(security.DefaultGuardConfig())
+	done := make(chan struct{})
+	go func() {
+		handleClient(bridgeConn, "127.0.0.1:1", guard)
+		close(done)
+	}()
+
+	request := "GET / HTTP/1.1\r\nHost: relay.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"
+	if _, err := io.WriteString(clientConn, request); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	response, err := io.ReadAll(clientConn)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if !strings.HasPrefix(string(response), "HTTP/1.1 502 Bad Gateway") {
+		t.Fatalf("response = %q, want HTTP 502", response)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handleClient() did not exit")
 	}
 }

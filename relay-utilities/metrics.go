@@ -62,6 +62,10 @@ func (c *TelemetryCounters) HandshakeFinished(success bool) {
 	}
 }
 
+func (c *TelemetryCounters) HandshakeCancelled() {
+	c.ActiveHandshakes.Add(-1)
+}
+
 func (c *TelemetryCounters) SSHSessionStarted() {
 	active := c.ActiveSSHSessions.Add(1)
 	c.TotalSSHSessions.Add(1)

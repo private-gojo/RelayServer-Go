@@ -94,9 +94,12 @@ func relayLeg(src net.Conn, dst net.Conn, isClientToSSH bool) (uint64, string) {
 				}
 			}
 			if writeErr != nil {
-				if isTimeoutError(writeErr) {
+				switch {
+				case errors.Is(writeErr, net.ErrClosed):
+					endReason = "peer_leg_closed"
+				case isTimeoutError(writeErr):
 					endReason = "idle_timeout"
-				} else {
+				default:
 					endReason = "write_error"
 				}
 				break
@@ -106,6 +109,8 @@ func relayLeg(src net.Conn, dst net.Conn, isClientToSSH bool) (uint64, string) {
 			switch {
 			case errors.Is(readErr, io.EOF):
 				endReason = "eof"
+			case errors.Is(readErr, net.ErrClosed):
+				endReason = "peer_leg_closed"
 			case isTimeoutError(readErr):
 				endReason = "idle_timeout"
 			default:
@@ -115,9 +120,14 @@ func relayLeg(src net.Conn, dst net.Conn, isClientToSSH bool) (uint64, string) {
 		}
 	}
 
-	if tcpDestination, ok := dst.(*net.TCPConn); ok {
-		_ = tcpDestination.CloseWrite()
+	if endReason == "eof" {
+		if tcpDestination, ok := dst.(*net.TCPConn); ok {
+			_ = tcpDestination.CloseWrite()
+		} else {
+			_ = dst.Close()
+		}
 	} else {
+		_ = src.Close()
 		_ = dst.Close()
 	}
 
@@ -167,13 +177,18 @@ func relayEndReason(clientToSSH, sshToClient string) string {
 			return "relay_" + reason
 		}
 	}
+	for _, reason := range []string{clientToSSH, sshToClient} {
+		if reason == "idle_timeout" {
+			return "relay_idle_timeout"
+		}
+	}
 	return "relay_complete"
 }
 
 func isSessionError(reason string) bool {
 	switch reason {
-	case "relay_complete", "healthcheck_200", "client_closed_during_handshake",
-		"security_rate_limited", "http_403_no_websocket_upgrade":
+	case "relay_complete", "relay_idle_timeout", "healthcheck_200", "client_closed_during_handshake",
+		"security_rate_limited", "peer_leg_closed", "http_403_no_websocket_upgrade":
 		return false
 	default:
 		return true
@@ -208,6 +223,14 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 		}
 		handshakePending = false
 		utilities.Counters.HandshakeFinished(success)
+	}
+
+	cancelHandshake := func() {
+		if !handshakePending {
+			return
+		}
+		handshakePending = false
+		utilities.Counters.HandshakeCancelled()
 	}
 
 	defer func() {
@@ -271,6 +294,7 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 		if readErr != nil {
 			switch {
 			case errors.Is(readErr, io.EOF) && len(raw) == 0:
+				cancelHandshake()
 				stats.endReason = "client_closed_during_handshake"
 			case isTimeoutError(readErr):
 				stats.endReason = "handshake_timeout"
@@ -315,6 +339,7 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 	var allowed bool
 	peerIP, allowed = guard.Acquire(peerIP)
 	if !allowed {
+		cancelHandshake()
 		utilities.Counters.RejectedConns.Add(1)
 		stats.endReason = "security_rate_limited"
 		bridgeLog.Warn("connection_rejected", "session_id", sessionID, "peer_ip", peerIP, "component_reason", "ingress_guard")
@@ -330,6 +355,28 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 			"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		return
 	}
+
+	sshConnectStarted := time.Now()
+	sshConn, dialErr := net.DialTimeout("tcp", sshAddr, 2*time.Second)
+	stats.sshConnectMs = fmt.Sprintf("%.1f", float64(time.Since(sshConnectStarted).Microseconds())/1000)
+	if dialErr != nil {
+		utilities.Counters.FailedSSHConnections.Add(1)
+		stats.endReason = "ssh_connect_error"
+		bridgeLog.Error("ssh_backend_connect_failed",
+			"session_id", sessionID,
+			"backend", sshAddr,
+			"error", dialErr.Error(),
+		)
+		_ = writeHTTPResponse(clientConn,
+			"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+		return
+	}
+
+	trackConn(sshConn)
+	defer func() {
+		untrackConn(sshConn)
+		_ = sshConn.Close()
+	}()
 
 	response := fmt.Sprintf(
 		"HTTP/1.1 101 Switching Protocols\r\n"+
@@ -350,25 +397,6 @@ func handleClient(clientConn net.Conn, sshAddr string, guard *security.IngressGu
 
 	_ = clientConn.SetDeadline(time.Time{})
 
-	sshConnectStarted := time.Now()
-	sshConn, dialErr := net.DialTimeout("tcp", sshAddr, 5*time.Second)
-	stats.sshConnectMs = fmt.Sprintf("%.1f", float64(time.Since(sshConnectStarted).Microseconds())/1000)
-	if dialErr != nil {
-		utilities.Counters.FailedSSHConnections.Add(1)
-		stats.endReason = "ssh_connect_error"
-		bridgeLog.Error("ssh_backend_connect_failed",
-			"session_id", sessionID,
-			"backend", sshAddr,
-			"error", dialErr.Error(),
-		)
-		return
-	}
-
-	trackConn(sshConn)
-	defer func() {
-		untrackConn(sshConn)
-		_ = sshConn.Close()
-	}()
 	utilities.Counters.SSHSessionStarted()
 	activeSSHSession = true
 
