@@ -104,6 +104,7 @@ RUN mkdir -p /etc/dropbear /var/log/supervisor /etc/x-relay /run/nginx && \
     rm -f /etc/nginx/http.d/default.conf /etc/nginx/conf.d/default.conf
 
 COPY relay-web/banner.txt /etc/x-relay/banner.txt
+RUN test "$(wc -c < /etc/x-relay/banner.txt)" -le 4096
 COPY relay-utilities/supervisord.conf /etc/supervisord.conf
 COPY relay-utilities/entrypoint.sh /entrypoint.sh
 COPY relay-security/nginx.conf.template /etc/x-relay/nginx.conf.template
